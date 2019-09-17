@@ -1,0 +1,444 @@
+*---------------------------------------------------------------------*
+* Report  ZIMDG_NAM_TEST
+* Created By - SREEHARI M
+* Date       - 07/04/2016
+* Case Number- G05884830
+* Purpose    - Custom Tcode to prind hazardous data For sales orders
+*              with IMDG regulation.User will enter description and other
+*              details against each material in selection screen.
+*-----------------------------------------------------------------------
+* ====================================================================== *
+* Change History                                                         *
+* Changed by            : PADMA,C                                  *
+* Change Date           : 30-08-2016                                     *
+* Transport Request Id  : WD3K903039                                     *
+* Clarify Case          : RITM2972694                                    *
+* Description           : made it to work for Delivery aswell                                *
+*------------------------------------------------------------------------*
+
+REPORT ze_imdg_nam.
+TABLES:sscrfields,vbap,t001w,kna1.
+TYPES:BEGIN OF ty_werks,
+        matnr TYPE matnr,
+        werks TYPE werks_d,
+      END OF ty_werks,
+      BEGIN OF ty_werks_detail,
+        werks TYPE werks_d,
+        name2 TYPE name2,
+        stras TYPE stras,
+        pstlz TYPE pstlz,
+        ort01 TYPE ort01,
+      END OF ty_werks_detail.
+DATA:lv_vbeln        TYPE vbeln,
+     lv_vbeln_p      TYPE vbeln,
+     lv_pobstkd      TYPE bstkd,
+     lv_po           TYPE bstkd,
+     lv_error        TYPE char100,
+     lv_nodg         TYPE abap_bool,
+     lv_ucom         TYPE syst_ucomm,
+     lv_valid        TYPE xfeld,
+     lv_refresh      TYPE xfeld,
+     lw_variant      TYPE  disvariant,
+     lw_layout       TYPE lvc_s_layo,
+     et_matnr        TYPE zer0086_line_data,
+     lt_matnr        TYPE zer0086_line_data,
+     lt_matnr_dg     TYPE zer0088,
+     lt_werks        TYPE TABLE OF ty_werks,
+     lw_consignee    TYPE zes0161,
+     lt_sender       TYPE zer0094,
+     lt_quantity     TYPE zer0095,
+     lt_werks_detail TYPE TABLE OF ty_werks_detail,
+     lw_matnr_dg     TYPE zes0116,
+     ew_matnr        TYPE zes_imdg_line_data,
+     lt_change       TYPE lvc_t_modi,
+     lt_bad_cells    TYPE lvc_t_modi,
+     lt_dg_hazard    TYPE zer_dg_hazard,
+     lt_msg          TYPE lvc_t_msg1,
+     lt_conversion   TYPE lvc_t_roid,
+     lt_fieldcat     TYPE lvc_t_fcat,
+     lo_dock         TYPE REF TO cl_gui_docking_container,
+     lo_cont         TYPE REF TO cl_gui_container,
+     g_grid          TYPE REF TO cl_gui_alv_grid.
+
+
+
+DATA: lt_good  TYPE TABLE OF lvc_s_modi,
+      lw_good  TYPE lvc_s_modi,
+      lv_index TYPE n.
+* local class to handle semantic checks
+CLASS lcl_event_receiver DEFINITION DEFERRED.
+
+DATA: g_event_receiver TYPE REF TO lcl_event_receiver.
+
+**Define and implement event handler to handle event DATA_CHANGED.
+*class lcl_event_receiver          definition deferred.
+
+"Event handle for data changed on ALV
+CLASS lcl_event_receiver DEFINITION.
+
+  PUBLIC SECTION.
+    METHODS:
+      handle_data_changed
+                    FOR EVENT data_changed OF cl_gui_alv_grid
+        IMPORTING er_data_changed.
+
+  PRIVATE SECTION.
+
+    DATA: error_in_data TYPE c.
+ENDCLASS.
+CLASS lcl_event_receiver IMPLEMENTATION.
+  METHOD handle_data_changed.
+
+    DATA: lt_good TYPE TABLE OF lvc_s_modi,
+          ls_good TYPE lvc_s_modi.
+    error_in_data = space.
+
+
+    LOOP AT er_data_changed->mt_good_cells INTO ls_good.
+      APPEND ls_good TO lt_good.
+    ENDLOOP.
+*    EXPORT  data = lt_good TO MEMORY ID sy-cprog.
+  ENDMETHOD.
+ENDCLASS.
+
+** Selection Screen
+SELECTION-SCREEN: FUNCTION KEY 1.
+SELECTION-SCREEN BEGIN OF BLOCK sel WITH FRAME TITLE t1.
+***Begin of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+PARAMETERS: p_sorder RADIOBUTTON GROUP g1 DEFAULT 'X' USER-COMMAND ucomm,
+            p_delvry RADIOBUTTON GROUP g1,
+            p_vbeln1 TYPE lips-vbeln.
+***End of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+PARAMETERS: p_vbeln TYPE vbak-vbeln.
+SELECTION-SCREEN END OF BLOCK sel.
+*CLEAR:lv_vbeln.
+*lv_vbeln = p_vbeln.
+** Initilization
+INITIALIZATION.
+  t1 = 'Enter Sales order'.
+  IMPORT data = et_matnr FROM MEMORY ID sy-cprog.
+  FREE MEMORY ID sy-cprog.
+
+AT SELECTION-SCREEN OUTPUT.
+***Begin of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+  IF p_sorder = 'X'.
+    LOOP AT SCREEN.
+      IF screen-name = 'P_VBELN1'.
+        screen-input = '0'.
+      ENDIF.
+      MODIFY SCREEN.
+    ENDLOOP.
+  ELSEIF p_delvry = 'X'.
+    LOOP AT SCREEN.
+      IF screen-name = 'P_VBELN'.
+        screen-input = '0'.
+      ENDIF.
+      MODIFY SCREEN.
+    ENDLOOP.
+  ENDIF.
+***End of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+  IF et_matnr IS NOT INITIAL.
+    sscrfields-functxt_01 = 'Print Output Form'.
+    IF lo_dock IS INITIAL.
+      CREATE OBJECT lo_dock
+        EXPORTING
+          repid = sy-cprog
+          dynnr = sy-dynnr
+          ratio = 80
+          side  = cl_gui_docking_container=>dock_at_bottom
+          name  = 'DOCK_CONT'.
+      IF sy-subrc <> 0.
+        lv_error =  'Error in the Docking control'.
+      ENDIF.
+    ENDIF.
+
+    IF  g_grid IS INITIAL.
+      CREATE OBJECT g_grid
+        EXPORTING
+          i_parent = lo_dock.
+    ENDIF.
+
+    IF lt_fieldcat IS INITIAL.
+      CALL METHOD zcl_imdg_nam=>get_field_catalogue
+        EXPORTING
+          lv_tabname  = 'et_matnr'
+        IMPORTING
+          lt_fieldcat = lt_fieldcat.
+    ENDIF.
+    IF  g_event_receiver IS INITIAL.
+      CREATE OBJECT g_event_receiver.
+      SET HANDLER g_event_receiver->handle_data_changed FOR g_grid.
+    ENDIF.
+*Optimising output ALV display
+    lw_variant-report = sy-repid.
+    lw_variant-username = sy-uname.
+    lw_layout-zebra = 'X'.
+    lw_layout-edit_mode = 'X'.
+    lw_layout-no_toolbar = 'X'.
+    CALL METHOD g_grid->set_table_for_first_display
+      EXPORTING
+        i_structure_name = 'et_matnr'
+        is_variant       = lw_variant
+        i_save           = 'U'
+        i_default        = 'X'
+        is_layout        = lw_layout
+      CHANGING
+        it_outtab        = et_matnr[]
+        it_fieldcatalog  = lt_fieldcat[].
+  ENDIF.
+** At Selection screen
+AT SELECTION-SCREEN.
+  CLEAR:lv_error.
+  lv_ucom = sy-ucomm.
+
+  IF lv_ucom EQ 'ONLI'.
+***Begin of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+    IF p_sorder = 'X'.
+***End of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+      CALL METHOD zcl_imdg_nam=>validate_input
+        EXPORTING
+          lv_salesorder = p_vbeln
+        IMPORTING
+          e_errmsg      = lv_error.
+      IF lv_error IS NOT INITIAL.
+        MESSAGE e000(zehs) WITH lv_error.
+*      EXPORT  data = lv_error TO MEMORY ID sy-cprog.
+      ENDIF.
+***Begin of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+    ELSEIF p_delvry = 'X'.
+      CALL METHOD zcl_imdg_nam=>validate_input1
+        EXPORTING
+          lv_delivery = p_vbeln1
+        IMPORTING
+          e_errmsg    = lv_error.
+      IF lv_error IS NOT INITIAL.
+        MESSAGE e000(zehs) WITH lv_error.
+*      EXPORT  data = lv_error TO MEMORY ID sy-cprog.
+      ENDIF.
+    ENDIF.
+***End of changes PADMA,C, WD3K903039, 30/08/2016,RITM2972694
+  ELSEIF lv_ucom EQ 'FC01'.
+
+    CALL METHOD g_grid->check_changed_data
+      IMPORTING
+        e_valid = lv_valid.
+    IF lv_valid EQ abap_true.
+      PERFORM get_shipper_po.
+      PERFORM get_consignee_quantity.
+      PERFORM get_haz_data.
+      PERFORM display_output.
+    ENDIF.
+  ENDIF.
+
+START-OF-SELECTION.
+
+  CLEAR:lv_error.
+  CALL METHOD zcl_imdg_nam=>fetch_line_item
+    IMPORTING
+      et_matnr = et_matnr
+      e_errmsg = lv_error.
+  IF lv_error IS NOT INITIAL.
+    MESSAGE e000(zehs) WITH lv_error.
+  ENDIF.
+  EXPORT  data = et_matnr TO MEMORY ID sy-cprog.
+*&---------------------------------------------------------------------*
+*&      Form  GET_SHIPPER_PO
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_shipper_po .
+  DATA:lw_werks        TYPE ty_werks,
+       lw_werks_detail TYPE ty_werks_detail,
+       lw_sender       TYPE zes0159.
+  lv_vbeln_p = p_vbeln.
+  SELECT matnr
+         werks
+    FROM vbap
+    INTO TABLE lt_werks
+    WHERE vbeln EQ lv_vbeln_p.
+  DELETE ADJACENT DUPLICATES FROM lt_werks.
+  IF lt_werks IS NOT INITIAL.
+    SELECT werks
+           name2
+           stras
+           pstlz
+           ort01
+      FROM t001w
+      INTO TABLE lt_werks_detail
+      FOR ALL ENTRIES IN lt_werks
+      WHERE werks EQ lt_werks-werks.
+    LOOP AT lt_werks INTO lw_werks.
+      READ TABLE lt_werks_detail INTO lw_werks_detail WITH KEY werks = lw_werks-werks.
+      lw_sender-matnr = lw_werks-matnr.
+      lw_sender-werks = lw_werks-werks.
+      lw_sender-name2 = lw_werks_detail-name2.
+      lw_sender-ort01 = lw_werks_detail-ort01.
+      lw_sender-pstlz = lw_werks_detail-pstlz.
+      lw_sender-stras = lw_werks_detail-stras.
+      APPEND lw_sender TO lt_sender. "shipper
+    ENDLOOP.
+  ENDIF.
+  "puchase order number
+  SELECT SINGLE bstkd
+    FROM vbkd
+    INTO lv_pobstkd
+    WHERE vbeln EQ lv_vbeln_p.
+ENDFORM.                    " GET_SHIPPER
+*&---------------------------------------------------------------------*
+*&      Form  GET_CONSIGNEE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_consignee_quantity .
+  DATA: lv_kunnr TYPE kunnr_wk.
+  SELECT SINGLE kunnr
+    FROM vbpa
+    INTO lv_kunnr
+    WHERE vbeln EQ lv_vbeln_p.
+  SELECT SINGLE land1
+    name1
+    ort01
+    pstlz
+    regio
+    stras
+    FROM kna1
+    INTO lw_consignee  "Consignee
+    WHERE kunnr EQ lv_kunnr.
+
+  "qauntity of sales order
+  SELECT matnr
+         kwmeng
+    FROM vbap
+    INTO TABLE lt_quantity
+    WHERE vbeln EQ lv_vbeln_p.
+ENDFORM.                    " GET_CONSIGNEE
+*&---------------------------------------------------------------------*
+*&      Form  GET_HAZ_DATA
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM get_haz_data .
+  LOOP AT et_matnr INTO ew_matnr.
+    lw_matnr_dg-matnr = ew_matnr-matnr.
+    APPEND lw_matnr_dg TO lt_matnr_dg.
+  ENDLOOP.
+  CALL METHOD zcl_imdg_nam=>fetch_haz
+    EXPORTING
+      lt_matnr     = lt_matnr_dg
+    IMPORTING
+      e_errmsg     = lv_error
+      lv_nodg      = lv_nodg
+      et_dg_hazard = lt_dg_hazard.
+
+ENDFORM.                    " GET_HAZ_DATA
+*&---------------------------------------------------------------------*
+*&      Form  DISPLAY_OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM display_output .
+  DATA : lv_formname           TYPE tdsfname,
+         lv_smart_form         TYPE rs38l_fnam,
+         lv_control_parameters TYPE ssfctrlop,
+         lv_output_options     TYPE ssfcompop.
+
+** Passing for spool requist & print parameters
+  lv_output_options-tdnewid   = 'X'.
+  lv_control_parameters-preview   = 'X'.
+  lv_output_options-tdnoprev  = ''.
+  lv_output_options-tdnoprint = 'X'.
+*     lv_control_parameters-no_dialog = 'X'.
+  lv_output_options-tdnoprint = ''.
+  lv_output_options-tdimmed = 'X'.
+*     x_ssfcompop-tddest = nast-ldest.
+
+*  lv_control_parameters-no_dialog = abap_false.
+*  lv_control_parameters-PREVIEW = abap_true.
+*  lv_output_options-tdnewid     = abap_true.
+  lv_formname = 'ZESF_IMDG_NAM'.
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = lv_formname
+    IMPORTING
+      fm_name            = lv_smart_form
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+  IF sy-subrc <> 0.
+* Implement suitable error handling here
+  ENDIF.
+
+  CALL FUNCTION lv_smart_form
+    EXPORTING
+*     ARCHIVE_INDEX      =
+*     ARCHIVE_INDEX_TAB  =
+*     ARCHIVE_PARAMETERS =
+      control_parameters = lv_control_parameters
+*     MAIL_APPL_OBJ      =
+*     MAIL_RECIPIENT     =
+*     MAIL_SENDER        =
+      output_options     = lv_output_options
+*     USER_SETTINGS      = 'X'
+      lv_vbeln           = lv_vbeln_p
+      lv_po              = lv_pobstkd
+      lw_consignee       = lw_consignee
+* IMPORTING
+*     DOCUMENT_OUTPUT_INFO       =
+*     JOB_OUTPUT_INFO    =
+*     JOB_OUTPUT_OPTIONS =
+    TABLES
+      lt_sender          = lt_sender
+      lt_dg_hazard       = lt_dg_hazard
+      lt_quantity        = lt_quantity
+      lt_matnr           = et_matnr
+* EXCEPTIONS
+*     FORMATTING_ERROR   = 1
+*     INTERNAL_ERROR     = 2
+*     SEND_ERROR         = 3
+*     USER_CANCELED      = 4
+*     OTHERS             = 5
+    .
+  IF sy-subrc <> 0.
+* Implement suitable error handling here
+  ENDIF.
+
+
+
+  "lt_sender
+  "lv_vbeln_p
+  "lw_consignee
+  "lv_pobstkd
+  "lt_qunatity
+  "et_matnr
+ENDFORM.                    " DISPLAY_OUTPUT
+
+
+*Selection texts
+*----------------------------------------------------------
+* P_DELVRY         Delivery
+* P_SORDER         Sales Order
+* P_VBELN         Sales Order
+* P_VBELN1         Delivery
+
+
+*Messages
+*----------------------------------------------------------
+*
+* Message class: ZEHS
+*000   & & & &
+
+----------------------------------------------------------------------------------
+Extracted by Direct Download Enterprise version 1.3.1 - E.G.Mellodew. 1998-2005 UK. Sap Release 740
